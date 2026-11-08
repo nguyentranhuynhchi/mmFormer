@@ -1,171 +1,97 @@
-import torch.nn.functional as F
+"""Loss criterions for mmFormer on MyoPS380 2D (4 canonical classes).
+
+Implements 3-branch objective: Loss_total = Loss_fuse + Loss_sep + Loss_prm
+where each branch uses CrossEntropyLoss + SoftDiceLoss on one-hot targets.
+"""
+from __future__ import annotations
+
 import torch
-import logging
 import torch.nn as nn
+import torch.nn.functional as F
+
+__all__ = [
+    "to_one_hot",
+    "cross_entropy_loss",
+    "dice_loss",
+    "compute_mmformer_loss",
+]
 
 
-__all__ = ['sigmoid_dice_loss','softmax_dice_loss','GeneralizedDiceLoss','FocalLoss', 'dice_loss']
+def to_one_hot(target: torch.Tensor, num_cls: int = 4) -> torch.Tensor:
+    """Convert integer label tensor (B, H, W) or (B, 1, H, W) to one-hot float tensor (B, num_cls, H, W)."""
+    if target.dim() == 4 and target.size(1) == 1:
+        target = target.squeeze(1)
+    b, h, w = target.shape
+    one_hot = torch.zeros((b, num_cls, h, w), device=target.device, dtype=torch.float32)
+    one_hot.scatter_(1, target.unsqueeze(1), 1.0)
+    return one_hot
 
-cross_entropy = F.cross_entropy
 
-def dice_loss(output, target, num_cls=5, eps=1e-7):
-    target = target.float()
+def cross_entropy_loss(output: torch.Tensor, target_one_hot: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    """Categorical Cross-entropy on softmax probability output and one-hot target."""
+    output = output.float()
+    target_one_hot = target_one_hot.float()
+    log_p = torch.log(torch.clamp(output, min=eps, max=1.0))
+    ce = -torch.sum(target_one_hot * log_p, dim=1)
+    return torch.mean(ce)
+
+
+def dice_loss(output: torch.Tensor, target_one_hot: torch.Tensor, num_cls: int = 4, eps: float = 1e-7) -> torch.Tensor:
+    """Soft Dice loss computed across 4 canonical classes with equal weight."""
+    output = output.float()
+    target_one_hot = target_one_hot.float()
+    total_dice = 0.0
     for i in range(num_cls):
-        num = torch.sum(output[:,i,:,:,:] * target[:,i,:,:,:])
-        l = torch.sum(output[:,i,:,:,:])
-        r = torch.sum(target[:,i,:,:,:])
-        if i == 0:
-            dice = 2.0 * num / (l+r+eps)
-        else:
-            dice += 2.0 * num / (l+r+eps)
-    return 1.0 - 1.0 * dice / num_cls
-
-def softmax_weighted_loss(output, target, num_cls=5):
-    target = target.float()
-    B, _, H, W, Z = output.size()
-    for i in range(num_cls):
-        outputi = output[:, i, :, :, :]
-        targeti = target[:, i, :, :, :]
-        weighted = 1.0 - (torch.sum(targeti, (1,2,3)) * 1.0 / torch.sum(target, (1,2,3,4)))
-        weighted = torch.reshape(weighted, (-1,1,1,1)).repeat(1,H,W,Z)
-        if i == 0:
-            cross_loss = -1.0 * weighted * targeti * torch.log(torch.clamp(outputi, min=0.005, max=1)).float()
-        else:
-            cross_loss += -1.0 * weighted * targeti * torch.log(torch.clamp(outputi, min=0.005, max=1)).float()
-    cross_loss = torch.mean(cross_loss)
-    return cross_loss
-            
-def softmax_loss(output, target, num_cls=5):
-    target = target.float()
-    _, _, H, W, Z = output.size()
-    for i in range(num_cls):
-        outputi = output[:, i, :, :, :]
-        targeti = target[:, i, :, :, :]
-        if i == 0:
-            cross_loss = -1.0 * targeti * torch.log(torch.clamp(outputi, min=0.005, max=1)).float()
-        else:
-            cross_loss += -1.0 * targeti * torch.log(torch.clamp(outputi, min=0.005, max=1)).float()
-    cross_loss = torch.mean(cross_loss)
-    return cross_loss
-
-def FocalLoss(output, target, alpha=0.25, gamma=2.0):
-    target[target == 4] = 3 # label [4] -> [3]
-    # target = expand_target(target, n_class=output.size()[1]) # [N,H,W,D] -> [N,4,H,W,D]
-    if output.dim() > 2:
-        output = output.view(output.size(0), output.size(1), -1)  # N,C,H,W,D => N,C,H*W*D
-        output = output.transpose(1, 2)  # N,C,H*W*D => N,H*W*D,C
-        output = output.contiguous().view(-1, output.size(2))  # N,H*W*D,C => N*H*W*D,C
-    if target.dim() == 5:
-        target = target.contiguous().view(target.size(0), target.size(1), -1)
-        target = target.transpose(1, 2)
-        target = target.contiguous().view(-1, target.size(2))
-    if target.dim() == 4:
-        target = target.view(-1) # N*H*W*D
-    # compute the negative likelyhood
-    logpt = -F.cross_entropy(output, target)
-    pt = torch.exp(logpt)
-    # compute the loss
-    loss = -((1 - pt) ** gamma) * logpt
-    # return loss.sum()
-    return loss.mean()
-
-def dice(output, target,eps =1e-5): # soft dice loss
-    target = target.float()
-    # num = 2*(output*target).sum() + eps
-    num = 2*(output*target).sum()
-    den = output.sum() + target.sum() + eps
-    return 1.0 - num/den
-
-def sigmoid_dice_loss(output, target,alpha=1e-5):
-    # output: [-1,3,H,W,T]
-    # target: [-1,H,W,T] noted that it includes 0,1,2,4 here
-    loss1 = dice(output[:,0,...],(target==1).float(),eps=alpha)
-    loss2 = dice(output[:,1,...],(target==2).float(),eps=alpha)
-    loss3 = dice(output[:,2,...],(target == 4).float(),eps=alpha)
-    logging.info('1:{:.4f} | 2:{:.4f} | 4:{:.4f}'.format(1-loss1.data, 1-loss2.data, 1-loss3.data))
-    return loss1+loss2+loss3
+        num = 2.0 * torch.sum(output[:, i, ...] * target_one_hot[:, i, ...])
+        den = torch.sum(output[:, i, ...]) + torch.sum(target_one_hot[:, i, ...]) + eps
+        total_dice = total_dice + (num / den)
+    return 1.0 - (total_dice / num_cls)
 
 
-def softmax_dice_loss(output, target,eps=1e-5): #
-    # output : [bsize,c,H,W,D]
-    # target : [bsize,H,W,D]
-    loss1 = dice(output[:,1,...],(target==1).float())
-    loss2 = dice(output[:,2,...],(target==2).float())
-    loss3 = dice(output[:,3,...],(target==4).float())
-    logging.info('1:{:.4f} | 2:{:.4f} | 4:{:.4f}'.format(1-loss1.data, 1-loss2.data, 1-loss3.data))
-
-    return loss1+loss2+loss3
-
-
-# Generalised Dice : 'Generalised dice overlap as a deep learning loss function for highly unbalanced segmentations'
-def GeneralizedDiceLoss(output,target,eps=1e-5,weight_type='square'): # Generalized dice loss
-    """
-        Generalised Dice : 'Generalised dice overlap as a deep learning loss function for highly unbalanced segmentations'
-    """
-
-    # target = target.float()
-    if target.dim() == 4:
-        target[target == 4] = 3 # label [4] -> [3]
-        target = expand_target(target, n_class=output.size()[1]) # [N,H,W,D] -> [N,4，H,W,D]
-
-    output = flatten(output)[1:,...] # transpose [N,4，H,W,D] -> [4，N,H,W,D] -> [3, N*H*W*D] voxels
-    target = flatten(target)[1:,...] # [class, N*H*W*D]
-
-    target_sum = target.sum(-1) # sub_class_voxels [3,1] -> 3个voxels
-    if weight_type == 'square':
-        class_weights = 1. / (target_sum * target_sum + eps)
-    elif weight_type == 'identity':
-        class_weights = 1. / (target_sum + eps)
-    elif weight_type == 'sqrt':
-        class_weights = 1. / (torch.sqrt(target_sum) + eps)
+def compute_mmformer_loss(
+    fuse_pred: torch.Tensor,
+    sep_preds: list[torch.Tensor] | tuple[torch.Tensor, ...],
+    prm_preds: list[torch.Tensor] | tuple[torch.Tensor, ...],
+    target: torch.Tensor,
+    num_cls: int = 4,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Compute 3-branch mmFormer objective: Loss_total = Loss_fuse + Loss_sep + Loss_prm."""
+    if target.dim() == 4 and target.size(1) == 1:
+        target = target.squeeze(1)
+    if target.dim() == 3:
+        target_one_hot = to_one_hot(target, num_cls=num_cls)
+    elif target.dim() == 4 and target.size(1) == num_cls:
+        target_one_hot = target.float()
     else:
-        raise ValueError('Check out the weight_type :',weight_type)
+        raise ValueError(f"Unexpected target shape: {target.shape}, expected (B, H, W) or (B, {num_cls}, H, W)")
 
-    # print(class_weights)
-    intersect = (output * target).sum(-1)
-    intersect_sum = (intersect * class_weights).sum()
-    denominator = (output + target).sum(-1)
-    denominator_sum = (denominator * class_weights).sum() + eps
+    # 1. Main fused output loss
+    fuse_ce = cross_entropy_loss(fuse_pred, target_one_hot)
+    fuse_dice = dice_loss(fuse_pred, target_one_hot, num_cls=num_cls)
+    loss_fuse = fuse_ce + fuse_dice
 
-    loss1 = 2*intersect[0] / (denominator[0] + eps)
-    loss2 = 2*intersect[1] / (denominator[1] + eps)
-    loss3 = 2*intersect[2] / (denominator[2] + eps)
-    #logging.info('1:{:.4f} | 2:{:.4f} | 4:{:.4f}'.format(loss1.data, loss2.data, loss3.data))
+    # 2. Separate branch losses (bSSFP, LGE, T2w)
+    loss_sep = torch.zeros(1, device=fuse_pred.device, dtype=torch.float32)
+    for sp in sep_preds:
+        s_ce = cross_entropy_loss(sp, target_one_hot)
+        s_dice = dice_loss(sp, target_one_hot, num_cls=num_cls)
+        loss_sep = loss_sep + (s_ce + s_dice)
 
-    return 1 - 2. * intersect_sum / denominator_sum, [loss1.data, loss2.data, loss3.data]
+    # 3. Deep supervision pyramid losses (4 levels)
+    loss_prm = torch.zeros(1, device=fuse_pred.device, dtype=torch.float32)
+    for pp in prm_preds:
+        p_ce = cross_entropy_loss(pp, target_one_hot)
+        p_dice = dice_loss(pp, target_one_hot, num_cls=num_cls)
+        loss_prm = loss_prm + (p_ce + p_dice)
 
+    total_loss = loss_fuse + loss_sep + loss_prm
 
-def expand_target(x, n_class,mode='softmax'):
-    """
-        Converts NxDxHxW label image to NxCxDxHxW, where each label is stored in a separate channel
-        :param input: 4D input image (NxDxHxW)
-        :param C: number of channels/labels
-        :return: 5D output image (NxCxDxHxW)
-        """
-    assert x.dim() == 4
-    shape = list(x.size())
-    shape.insert(1, n_class)
-    shape = tuple(shape)
-    xx = torch.zeros(shape)
-    if mode.lower() == 'softmax':
-        xx[:,1,:,:,:] = (x == 1)
-        xx[:,2,:,:,:] = (x == 2)
-        xx[:,3,:,:,:] = (x == 3)
-    if mode.lower() == 'sigmoid':
-        xx[:,0,:,:,:] = (x == 1)
-        xx[:,1,:,:,:] = (x == 2)
-        xx[:,2,:,:,:] = (x == 3)
-    return xx.to(x.device)
-
-def flatten(tensor):
-    """Flattens a given tensor such that the channel axis is first.
-    The shapes are transformed as follows:
-       (N, C, D, H, W) -> (C, N * D * H * W)
-    """
-    C = tensor.size(1)
-    # new axis order
-    axis_order = (1, 0) + tuple(range(2, tensor.dim()))
-    # Transpose: (N, C, D, H, W) -> (C, N, D, H, W)
-    transposed = tensor.permute(axis_order)
-    # Flatten: (C, N, D, H, W) -> (C, N * D * H * W)
-    return transposed.reshape(C, -1)
+    metrics = {
+        "loss_total": total_loss.item(),
+        "loss_fuse": loss_fuse.item(),
+        "loss_fuse_ce": fuse_ce.item(),
+        "loss_fuse_dice": fuse_dice.item(),
+        "loss_sep": loss_sep.item(),
+        "loss_prm": loss_prm.item(),
+    }
+    return total_loss, metrics
