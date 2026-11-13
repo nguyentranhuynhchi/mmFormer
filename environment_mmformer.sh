@@ -54,6 +54,21 @@ TARGET_DATASET_DIR="/content/MyoPS380_dataset"
 mkdir -p "$DOWNLOAD_DIR"
 mkdir -p "$TARGET_DATASET_DIR"
 
+# Kiểm tra nếu dataset đã có sẵn trên Google Drive để copy trực tiếp, tránh rate limit của gdown
+for DRIVE_CANDIDATE in \
+    "/content/drive/MyDrive/dataset/MyoPS380/Processed_data" \
+    "/content/drive/MyDrive/MyoPS380_dataset/Processed_data" \
+    "/content/drive/MyDrive/Processed_data" \
+    "/content/drive/MyDrive/NCKH_V2/MyoPS380_dataset/Processed_data" \
+    "/content/drive/MyDrive/NCKH/MyoPS380_dataset/Processed_data"; do
+    if [ -d "$DRIVE_CANDIDATE" ] && [ -z "$(ls -A "$TARGET_DATASET_DIR/Processed_data" 2>/dev/null)" ]; then
+        echo "✅ Phát hiện dataset trên Google Drive: $DRIVE_CANDIDATE. Đang sao chép vào SSD cục bộ..."
+        mkdir -p "$TARGET_DATASET_DIR/Processed_data"
+        cp -r "$DRIVE_CANDIDATE/." "$TARGET_DATASET_DIR/Processed_data/"
+        break
+    fi
+done
+
 # Tải toàn bộ thư mục Google Drive nếu chưa tải
 if [ -z "$(ls -A "$DOWNLOAD_DIR" 2>/dev/null)" ] && [ -z "$(ls -A "$TARGET_DATASET_DIR/Processed_data" 2>/dev/null)" ]; then
     echo "Đang tải toàn bộ thư mục dataset từ Google Drive (Folder ID: $DATASET_FOLDER_ID)..."

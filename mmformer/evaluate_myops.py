@@ -59,6 +59,44 @@ def json_safe(val: Any) -> Any:
     return val
 
 
+def format_master_clinical_table(summary: dict[str, Any]) -> str:
+    """Format Master Benchmark clinical table matching specification."""
+    regions = [
+        "normal_myocardium",
+        "edema",
+        "scar",
+        "edema_inclusive",
+        "myocardial_ring",
+    ]
+    lines = [
+        "================================================================================",
+        "MASTER BENCHMARK CLINICAL EVALUATION RESULTS (Protocol: myops380_voxel_v3)",
+        "--------------------------------------------------------------------------------",
+        f"{'Region':<22} | {'Dice Mean':<10} | {'IoU Mean':<10} | {'HD95 (vox)':<12} | {'ASD (vox)':<10}",
+        "--------------------------------------------------------------------------------",
+    ]
+    for r_name in regions:
+        reg = summary.get(r_name, {})
+        d = reg.get("mean_dice")
+        i = reg.get("mean_iou")
+        h = reg.get("mean_hd95_voxel")
+        a = reg.get("mean_asd_voxel")
+        d_str = f"{d:.4f}" if d is not None else "N/A"
+        i_str = f"{i:.4f}" if i is not None else "N/A"
+        h_str = f"{h:.2f}" if h is not None else "N/A"
+        a_str = f"{a:.2f}" if a is not None else "N/A"
+        lines.append(f"{r_name:<22} | {d_str:<10} | {i_str:<10} | {h_str:<12} | {a_str:<10}")
+    lines.append("--------------------------------------------------------------------------------")
+    apd = summary.get("avg_pathology_dice")
+    apid = summary.get("avg_pathology_inclusive_dice")
+    apd_str = f"{apd:.4f}" if apd is not None else "N/A"
+    apid_str = f"{apid:.4f}" if apid is not None else "N/A"
+    lines.append(f"{'avg_pathology_dice':<22} | {apd_str:<10} | {'':<10} | {'':<12} | {'':<10}")
+    lines.append(f"{'avg_pathology_inclusive_dice':<22} | {apid_str:<10} | {'':<10} | {'':<12} | {'':<10}")
+    lines.append("================================================================================")
+    return "\n".join(lines)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate mmFormer on MyoPS380 official 76 test cases")
     parser.add_argument(
@@ -69,18 +107,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-root",
+        "--data_root",
+        dest="data_root",
         type=str,
         default=os.environ.get("LOCAL_DATASET", "E:/STUDY/DATASET/MyoPS380/Processed_data"),
         help="Path to preprocessed MyoPS380 dataset root containing bSSFP, LGE, T2w",
     )
     parser.add_argument(
         "--list-dir",
+        "--list_dir",
+        dest="list_dir",
         type=str,
         default=str(repo_root / "splits" / "myops380_no_val"),
         help="Path to split manifests folder containing test_vol.txt",
     )
     parser.add_argument(
         "--output-dir",
+        "--output_dir",
+        dest="output_dir",
         type=str,
         default=None,
         help="Directory to save evaluation reports and prediction files",
@@ -267,18 +311,10 @@ def main() -> None:
             json.dump(json_safe(metrics_payload), f, indent=2)
         logger.info("Summary metrics saved to: %s", json_file)
 
-        # Summary log output
-        scar_mean = summary["scar"]["mean_dice"]
-        edema_inc_mean = summary["edema_inclusive"]["mean_dice"]
-        myo_ring_mean = summary["myocardial_ring"]["mean_dice"]
-        avg_path_inc = summary.get("avg_pathology_inclusive_dice", None)
-        logger.info("================================================================================")
-        logger.info("BENCHMARK SUMMARY (myops380_voxel_v3):")
-        logger.info("Scar Mean Dice:                %.4f", scar_mean if scar_mean is not None else float("nan"))
-        logger.info("Edema-Inclusive Mean Dice:     %.4f", edema_inc_mean if edema_inc_mean is not None else float("nan"))
-        logger.info("Myocardial Ring Mean Dice:     %.4f", myo_ring_mean if myo_ring_mean is not None else float("nan"))
-        logger.info("Avg Pathology Inclusive Dice:  %.4f", avg_path_inc if avg_path_inc is not None else float("nan"))
-        logger.info("================================================================================")
+        # Print Master Benchmark clinical table to terminal and logger
+        clinical_table_str = format_master_clinical_table(summary)
+        for line in clinical_table_str.splitlines():
+            logger.info("%s", line)
 
 
 if __name__ == "__main__":

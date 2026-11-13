@@ -16,6 +16,16 @@ from .metrics import (
     dataset_rows,
     summarize_dataset_rows,
 )
+from .efficiency import (
+    build_efficiency_payload,
+    check_rule_compliance,
+    count_parameters,
+    format_efficiency_report,
+    measure_flops,
+    measure_inference_efficiency,
+    save_efficiency_report,
+    summarize_training_efficiency,
+)
 
 __all__ = [
     "to_one_hot",
@@ -30,4 +40,12 @@ __all__ = [
     "binary_metrics",
     "dataset_rows",
     "summarize_dataset_rows",
+    "build_efficiency_payload",
+    "check_rule_compliance",
+    "count_parameters",
+    "format_efficiency_report",
+    "measure_flops",
+    "measure_inference_efficiency",
+    "save_efficiency_report",
+    "summarize_training_efficiency",
 ]
