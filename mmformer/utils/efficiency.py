@@ -138,6 +138,7 @@ def measure_inference_efficiency(
         "warmup_runs": int(warmup),
         "measure_runs": int(repeats),
         "latency_ms_per_slice": round(latency_ms, 4),
+        "latency_ms": round(latency_ms, 4),
         "peak_vram_bytes": peak_alloc_bytes,
         "peak_vram_mb": round(peak_mb, 2),
         "peak_vram_gb": round(peak_gb, 4),
@@ -192,8 +193,10 @@ def summarize_training_efficiency(
         "peak_vram_bytes": int(peak_vram_bytes),
         "peak_vram_mb": round(peak_mb, 2),
         "peak_vram_gb": round(peak_gb, 4),
+        "gpu_mem_training_mb": round(peak_mb, 2),
         "peak_vram_reserved_mb": round(reserved_mb, 2),
         "peak_vram_reserved_gb": round(reserved_gb, 4),
+        "epoch_times_1_to_5": [round(t, 4) for t in times[:5]],
         "epoch_times_1_to_5_s": [round(t, 4) for t in times[:5]],
         "all_epoch_times_s": [round(t, 4) for t in times],
     }

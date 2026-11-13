@@ -97,10 +97,12 @@ def format_master_clinical_table(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(args: Any = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate mmFormer on MyoPS380 official 76 test cases")
     parser.add_argument(
         "--checkpoint",
+        "--ckpt",
+        dest="checkpoint",
         type=str,
         required=True,
         help="Path to trained checkpoint (e.g. outputs/runs/mmformer_seed1234/checkpoints/mmformer_seed1234.pt)",
@@ -131,12 +133,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--save-predictions",
-        action="store_true",
+        "--save_predictions",
+        dest="save_predictions",
+        action=argparse.BooleanOptionalAction,
         default=True,
         help="Save test_predictions/<CaseID>_pred.npz files (default: True)",
     )
     parser.add_argument("--device", type=str, default="auto", help="Execution device ('auto', 'cuda', 'cpu')")
-    return parser.parse_args()
+    return parser.parse_args(args)
 
 
 def predict_case_volume(
@@ -177,8 +181,8 @@ def predict_case_volume(
     return prediction_3d
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: Any = None) -> None:
+    args = parse_args(argv)
     ckpt_path = Path(args.checkpoint)
     if not ckpt_path.is_file():
         raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path}")

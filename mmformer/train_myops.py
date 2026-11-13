@@ -113,7 +113,7 @@ def _dedupe_paths(paths: list[Path]) -> list[Path]:
     return unique
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(args: Any = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train mmFormer on MyoPS380 without validation")
     parser.add_argument(
         "--data-root",
@@ -230,11 +230,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Measure Complexity + Inference efficiency only (skip training loop)",
     )
-    return parser.parse_args()
+    return parser.parse_args(args)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: Any = None) -> None:
+    args = parse_args(argv)
 
     # Determine run directory and checkpoint path
     run_name = args.run_name or f"mmformer_seed{args.seed}"
@@ -357,10 +357,17 @@ def main() -> None:
     # Ensure FP32 base weights and move model to device
     model.float().to(device)
 
+    eff_out_parent = Path(args.efficiency_output).parent
     efficiency_json_targets = _dedupe_paths(
         [Path(args.efficiency_output), run_dir / "efficiency_metrics.json"]
     )
-    efficiency_summary_targets = _dedupe_paths([log_dir / "efficiency_summary.txt"])
+    efficiency_summary_targets = _dedupe_paths(
+        [
+            log_dir / "efficiency_summary.txt",
+            eff_out_parent / "logs" / "efficiency_summary.txt",
+            eff_out_parent / "efficiency_summary.txt",
+        ]
+    )
 
     flops_info: dict[str, Any] | None = None
     inference_info: dict[str, Any] | None = None

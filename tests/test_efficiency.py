@@ -17,8 +17,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from mmformer.mmformer import Model
-from mmformer.evaluate_myops import format_master_clinical_table
-from mmformer.train_myops import parse_args
+from mmformer.evaluate_myops import format_master_clinical_table, parse_args as parse_eval_args
+from mmformer.train_myops import parse_args as parse_train_args
 from mmformer.utils.efficiency import (
     BYTES_PER_GB,
     BYTES_PER_MB,
@@ -79,6 +79,7 @@ class TestEfficiencySuite(unittest.TestCase):
         self.assertTrue(model.training)
         self.assertEqual(inf_info["batch_size"], 1)
         self.assertGreater(inf_info["latency_ms_per_slice"], 0.0)
+        self.assertEqual(inf_info["latency_ms"], inf_info["latency_ms_per_slice"])
         self.assertEqual(inf_info["peak_vram_mb"], 0.0)
         self.assertEqual(inf_info["peak_vram_gb"], 0.0)
 
@@ -97,7 +98,9 @@ class TestEfficiencySuite(unittest.TestCase):
         self.assertEqual(summary["warmup_epochs_skipped"], 5)
         self.assertEqual(summary["measured_epoch_range"], "6..300")
         self.assertEqual(summary["time_per_epoch_s"], 10.0)
+        self.assertEqual(summary["epoch_times_1_to_5"], [100.0] * 5)
         self.assertEqual(summary["epoch_times_1_to_5_s"], [100.0] * 5)
+        self.assertEqual(summary["gpu_mem_training_mb"], 2500.0)
         self.assertAlmostEqual(summary["total_time_hours"], sum(epoch_times) / 3600.0, places=3)
         self.assertEqual(summary["peak_vram_mb"], 2500.0)
         self.assertAlmostEqual(summary["peak_vram_gb"], 2500.0 / 1024.0, places=4)
@@ -237,9 +240,8 @@ class TestEfficiencySuite(unittest.TestCase):
             self.assertEqual(loaded["excel_summary"]["Trainable Params (M)"], 24.05)
 
     def test_cli_argument_aliases(self) -> None:
-        """Verify hyphen and underscore CLI argument aliases parse identically."""
-        sys_argv_hyphen = [
-            "train_myops.py",
+        """Verify hyphen and underscore CLI argument aliases parse identically for train_myops."""
+        argv_hyphen = [
             "--data-root", "E:/data",
             "--list-dir", "E:/splits",
             "--run-root", "E:/runs",
@@ -253,8 +255,7 @@ class TestEfficiencySuite(unittest.TestCase):
             "--efficiency-warmup", "10",
             "--efficiency-repeats", "20",
         ]
-        sys_argv_underscore = [
-            "train_myops.py",
+        argv_underscore = [
             "--data_root", "E:/data",
             "--list_dir", "E:/splits",
             "--run_root", "E:/runs",
@@ -269,25 +270,57 @@ class TestEfficiencySuite(unittest.TestCase):
             "--efficiency_repeats", "20",
         ]
 
-        old_argv = sys.argv
-        try:
-            sys.argv = sys_argv_hyphen
-            args_hyphen = parse_args()
-            sys.argv = sys_argv_underscore
-            args_underscore = parse_args()
+        args_hyphen = parse_train_args(argv_hyphen)
+        args_underscore = parse_train_args(argv_underscore)
 
-            self.assertEqual(args_hyphen.data_root, args_underscore.data_root)
-            self.assertEqual(args_hyphen.list_dir, args_underscore.list_dir)
-            self.assertEqual(args_hyphen.run_root, args_underscore.run_root)
-            self.assertEqual(args_hyphen.run_name, args_underscore.run_name)
-            self.assertEqual(args_hyphen.batch_size, args_underscore.batch_size)
-            self.assertEqual(args_hyphen.weight_decay, args_underscore.weight_decay)
-            self.assertEqual(args_hyphen.num_workers, args_underscore.num_workers)
-            self.assertEqual(args_hyphen.pin_memory, args_underscore.pin_memory)
-            self.assertEqual(args_hyphen.measure_efficiency, args_underscore.measure_efficiency)
-            self.assertEqual(args_hyphen.efficiency_output, args_underscore.efficiency_output)
-        finally:
-            sys.argv = old_argv
+        self.assertEqual(args_hyphen.data_root, args_underscore.data_root)
+        self.assertEqual(args_hyphen.list_dir, args_underscore.list_dir)
+        self.assertEqual(args_hyphen.run_root, args_underscore.run_root)
+        self.assertEqual(args_hyphen.run_name, args_underscore.run_name)
+        self.assertEqual(args_hyphen.batch_size, args_underscore.batch_size)
+        self.assertEqual(args_hyphen.weight_decay, args_underscore.weight_decay)
+        self.assertEqual(args_hyphen.num_workers, args_underscore.num_workers)
+        self.assertEqual(args_hyphen.pin_memory, args_underscore.pin_memory)
+        self.assertEqual(args_hyphen.measure_efficiency, args_underscore.measure_efficiency)
+        self.assertEqual(args_hyphen.efficiency_output, args_underscore.efficiency_output)
+
+        # Negative boolean flags
+        args_neg = parse_train_args(["--no-pin-memory", "--no-measure-efficiency"])
+        self.assertFalse(args_neg.pin_memory)
+        self.assertFalse(args_neg.measure_efficiency)
+
+        args_neg_und = parse_train_args(["--no-pin_memory", "--no-measure_efficiency"])
+        self.assertFalse(args_neg_und.pin_memory)
+        self.assertFalse(args_neg_und.measure_efficiency)
+
+    def test_evaluate_cli_argument_aliases(self) -> None:
+        """Verify evaluation argument parsing supports aliases, ckpt, and save-predictions negation."""
+        args1 = parse_eval_args([
+            "--checkpoint", "E:/runs/model.pt",
+            "--data-root", "E:/dataset",
+            "--list-dir", "E:/splits",
+            "--output-dir", "E:/eval",
+            "--save-predictions",
+        ])
+        args2 = parse_eval_args([
+            "--ckpt", "E:/runs/model.pt",
+            "--data_root", "E:/dataset",
+            "--list_dir", "E:/splits",
+            "--output_dir", "E:/eval",
+            "--save_predictions",
+        ])
+        self.assertEqual(args1.checkpoint, args2.checkpoint)
+        self.assertEqual(args1.data_root, args2.data_root)
+        self.assertEqual(args1.list_dir, args2.list_dir)
+        self.assertEqual(args1.output_dir, args2.output_dir)
+        self.assertTrue(args1.save_predictions)
+        self.assertTrue(args2.save_predictions)
+
+        args_no_save = parse_eval_args(["--ckpt", "E:/runs/model.pt", "--no-save-predictions"])
+        self.assertFalse(args_no_save.save_predictions)
+
+        args_no_save_und = parse_eval_args(["--checkpoint", "E:/runs/model.pt", "--no-save_predictions"])
+        self.assertFalse(args_no_save_und.save_predictions)
 
     def test_evaluate_master_benchmark_clinical_table(self) -> None:
         """Verify format_master_clinical_table outputs proper headers, regions, and summary dice."""
@@ -393,6 +426,7 @@ class TestEfficiencySuite(unittest.TestCase):
             self.assertEqual(len(train_payload["training"]["all_epoch_times_s"]), 2)
             self.assertTrue((run_root / "smoke_train" / "efficiency_metrics.json").is_file())
             self.assertTrue((run_root / "smoke_train" / "logs" / "efficiency_summary.txt").is_file())
+            self.assertTrue((eff_out_train.parent / "efficiency_summary.txt").is_file())
 
             # 3) Simulate resume from epoch 1
             ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)

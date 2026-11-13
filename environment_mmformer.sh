@@ -69,6 +69,19 @@ for DRIVE_CANDIDATE in \
     fi
 done
 
+# Kiểm tra nếu có tệp zip dataset trên Google Drive để copy trực tiếp
+for DRIVE_ZIP in \
+    "/content/drive/MyDrive/dataset/MyoPS380/MyoPS380_dataset.zip" \
+    "/content/drive/MyDrive/MyoPS380_dataset.zip" \
+    "/content/drive/MyDrive/dataset/MyoPS380.zip" \
+    "/content/drive/MyDrive/MyoPS380.zip"; do
+    if [ -s "$DRIVE_ZIP" ] && [ -z "$(ls -A "$TARGET_DATASET_DIR/Processed_data" 2>/dev/null)" ]; then
+        echo "✅ Phát hiện tệp zip dataset trên Google Drive: $DRIVE_ZIP. Đang sao chép..."
+        cp "$DRIVE_ZIP" "$DOWNLOAD_DIR/"
+        break
+    fi
+done
+
 # Tải toàn bộ thư mục Google Drive nếu chưa tải
 if [ -z "$(ls -A "$DOWNLOAD_DIR" 2>/dev/null)" ] && [ -z "$(ls -A "$TARGET_DATASET_DIR/Processed_data" 2>/dev/null)" ]; then
     echo "Đang tải toàn bộ thư mục dataset từ Google Drive (Folder ID: $DATASET_FOLDER_ID)..."
