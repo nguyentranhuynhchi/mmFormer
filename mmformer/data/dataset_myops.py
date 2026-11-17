@@ -262,6 +262,108 @@ def read_split_lines(list_dir: str | Path, split: str) -> list[str]:
     return lines
 
 
+def resolve_dataset_roots(
+    data_root: str | Path,
+    is_volume: bool = False,
+) -> tuple[tuple[Path, Path, Path], bool]:
+    """Resolves modality directory roots for MyoPS datasets.
+
+    Handles diverse layout conventions across benchmarks:
+      1. Standard 3-modality subfolders: <cand>/bSSFP/<subfolder>, <cand>/LGE/<subfolder>, <cand>/T2w/<subfolder>
+      2. Direct 3-modality subfolders: <cand>/bSSFP, <cand>/LGE, <cand>/T2w (files stored without subfolder)
+      3. Single-directory layout: <cand>/<subfolder> or <cand> containing combined 3-channel or multi-key .npz/.h5 files
+         without modality subfolders (e.g. MyoPS++ flat export).
+
+    Returns:
+        roots: tuple of 3 Paths (roots for bSSFP, LGE, T2w)
+        is_single_root: bool (True if all modalities are in a single directory/file)
+    """
+    root = Path(data_root)
+    subfolder = "test_vol_h5" if is_volume else "train_npz"
+
+    # Candidate directories to search for modality subfolders (bSSFP, LGE, T2w)
+    candidates = [
+        root,
+        root / "Processed_data",
+        root / "cache",
+        root / "roi_128_1mm",
+        root / "roi_128_1mm" / "cache",
+        root / "myopspp_unet2d_roi128_1mm" / "cache",
+        root.parent,
+        root.parent / "Processed_data",
+        root.parent / "cache",
+        root.parent / "roi_128_1mm" / "cache",
+        root.parent / "myopspp_unet2d_roi128_1mm" / "cache",
+        # Common Colab paths
+        Path("/content/SCAR/data/myopspp_unet2d_roi128_1mm/cache"),
+        Path("/content/MyoPSpp_dataset/Processed_data"),
+        Path("/content/MyoPSpp_dataset"),
+        Path("/content/MyoPSpp_dataset/roi_128_1mm"),
+        Path("/content/MyoPS380_dataset/Processed_data"),
+        Path("/content/MyoPS380_dataset"),
+        Path("/content/drive/MyDrive/MyoPSpp_dataset/Processed_data"),
+        Path("/content/drive/MyDrive/MyoPS380_dataset/Processed_data"),
+    ]
+
+    # Check 1: 3-modality layout with subfolder (e.g., bSSFP/train_npz or bSSFP)
+    for cand in candidates:
+        if cand.is_dir() and (cand / "bSSFP").is_dir():
+            b_sub = cand / "bSSFP" / subfolder
+            if b_sub.is_dir():
+                return (cand / "bSSFP" / subfolder, cand / "LGE" / subfolder, cand / "T2w" / subfolder), False
+            # Or bSSFP contains files directly without train_npz/test_vol_h5 subfolder
+            b_files = list(cand.glob("bSSFP/*.npz")) + list(cand.glob("bSSFP/*.h5")) + list(cand.glob("bSSFP/*.npy.h5"))
+            if b_files:
+                return (cand / "bSSFP", cand / "LGE", cand / "T2w"), False
+            return (cand / "bSSFP", cand / "LGE", cand / "T2w"), False
+
+    # Check 2: Single-directory layout without bSSFP/LGE/T2w subfolders
+    single_candidates = [
+        root / subfolder,
+        root / "train_npz",
+        root / "test_vol_h5",
+        root,
+        root / "Processed_data" / subfolder,
+        root / "cache" / subfolder,
+        root.parent / subfolder,
+        root.parent / "train_npz",
+        root.parent / "test_vol_h5",
+    ]
+    for cand in single_candidates:
+        if cand.is_dir():
+            files = list(cand.glob("*.npz")) + list(cand.glob("*.h5")) + list(cand.glob("*.npy.h5"))
+            if files:
+                return (cand, cand, cand), True
+
+    # Fallback default
+    return (root / "bSSFP" / subfolder, root / "LGE" / subfolder, root / "T2w" / subfolder), False
+
+
+def resolve_file_path(root: Path, name: str, is_volume: bool = False) -> Path:
+    """Resolves individual sample file path in root or subfolders."""
+    subfolder = "test_vol_h5" if is_volume else "train_npz"
+    exts = (".npy.h5", ".h5", ".npz") if is_volume else (".npz", ".npy.h5", ".h5")
+    # 1. Direct match in root
+    for ext in exts:
+        cand = root / f"{name}{ext}"
+        if cand.is_file():
+            return cand
+    # 2. In standard subfolder
+    for ext in exts:
+        cand = root / subfolder / f"{name}{ext}"
+        if cand.is_file():
+            return cand
+    # 3. In alternate subfolder
+    for alt in ("train_npz", "test_npz", "test_vol_h5", "train_vol_h5"):
+        for ext in exts:
+            cand = root / alt / f"{name}{ext}"
+            if cand.is_file():
+                return cand
+    # Default fallback
+    default_ext = ".npy.h5" if is_volume else ".npz"
+    return root / f"{name}{default_ext}"
+
+
 class MyopsDataset(Dataset):
     """2D Slice Dataset for MyoPS380 and MyoPS++ training.
 
@@ -296,40 +398,63 @@ class MyopsDataset(Dataset):
 
         self.sample_list = read_split_lines(self.list_dir, split)
 
-        # Support nested Processed_data root if needed
-        root = self.data_root
-        if not (root / "bSSFP").exists() and (root / "Processed_data" / "bSSFP").exists():
-            root = root / "Processed_data"
-
-        self.modality_roots = [
-            root / "bSSFP",
-            root / "LGE",
-            root / "T2w",
-        ]
+        roots, self.is_single_root = resolve_dataset_roots(self.data_root, is_volume=False)
+        self.modality_roots = list(roots)
 
     def __len__(self) -> int:
         return len(self.sample_list)
 
-    def _read_slice(self, root: Path, sample_name: str) -> tuple[np.ndarray, np.ndarray | None]:
-        file_path = root / "train_npz" / f"{sample_name}.npz"
-        if not file_path.is_file():
-            alt = root / "test_npz" / f"{sample_name}.npz"
-            file_path = alt if alt.is_file() else file_path
+    def _read_slice(self, root_or_path: Path, sample_name: str | None = None) -> tuple[Any, np.ndarray | None]:
+        if sample_name is not None:
+            file_path = resolve_file_path(root_or_path, sample_name, is_volume=False)
+        else:
+            file_path = root_or_path
         if not file_path.is_file():
             raise FileNotFoundError(f"Could not find slice file: {file_path}")
 
         with np.load(file_path, allow_pickle=False) as data:
-            image = data["image"].astype(np.float32)
+            if "bSSFP" in data and "LGE" in data and "T2w" in data:
+                image = (data["bSSFP"].astype(np.float32), data["LGE"].astype(np.float32), data["T2w"].astype(np.float32))
+            elif "image" in data and "image1" in data and "image2" in data:
+                image = (data["image"].astype(np.float32), data["image1"].astype(np.float32), data["image2"].astype(np.float32))
+            elif "image" in data:
+                raw_img = data["image"].astype(np.float32)
+                if raw_img.ndim == 3 and raw_img.shape[0] == 3:
+                    image = (raw_img[0], raw_img[1], raw_img[2])
+                elif raw_img.ndim == 3 and raw_img.shape[-1] == 3:
+                    image = (raw_img[..., 0], raw_img[..., 1], raw_img[..., 2])
+                else:
+                    image = raw_img
+            else:
+                raise KeyError(f"No recognized image data in {file_path}")
             label = data["label"] if "label" in data else None
         return image, label
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         sample_name = self.sample_list[idx]
 
-        # Read bSSFP, LGE, T2w
-        img_bssfp, label = self._read_slice(self.modality_roots[0], sample_name)
-        img_lge, _ = self._read_slice(self.modality_roots[1], sample_name)
-        img_t2w, _ = self._read_slice(self.modality_roots[2], sample_name)
+        if getattr(self, "is_single_root", False):
+            sample_path = resolve_file_path(self.modality_roots[0], sample_name, is_volume=False)
+            img_data, label = self._read_slice(sample_path)
+            if isinstance(img_data, (tuple, list)) and len(img_data) == 3:
+                img_bssFP = np.asarray(img_data[0], dtype=np.float32)
+                img_lge = np.asarray(img_data[1], dtype=np.float32)
+                img_t2w = np.asarray(img_data[2], dtype=np.float32)
+            else:
+                img_bssFP = np.asarray(img_data, dtype=np.float32)
+                img_lge = img_bssFP.copy()
+                img_t2w = img_bssFP.copy()
+        else:
+            p0 = resolve_file_path(self.modality_roots[0], sample_name, is_volume=False)
+            p1 = resolve_file_path(self.modality_roots[1], sample_name, is_volume=False)
+            p2 = resolve_file_path(self.modality_roots[2], sample_name, is_volume=False)
+            img_bssFP, label = self._read_slice(p0)
+            img_lge, l1 = self._read_slice(p1)
+            img_t2w, l2 = self._read_slice(p2)
+            if isinstance(img_bssFP, (tuple, list)) and len(img_bssFP) == 3:
+                img_bssFP, img_lge, img_t2w = img_bssFP[0], img_bssFP[1], img_bssFP[2]
+            if label is None:
+                label = l1 if l1 is not None else l2
 
         if label is None:
             raise ValueError(f"Target label missing in {sample_name}")
@@ -338,7 +463,7 @@ class MyopsDataset(Dataset):
         label = canonicalize_label(label, order=self.label_order, dataset=self.dataset)
 
         sample = {
-            "image": img_bssfp,
+            "image": img_bssFP,
             "image1": img_lge,
             "image2": img_t2w,
             "label": label,
@@ -349,7 +474,7 @@ class MyopsDataset(Dataset):
         if self.transform is not None:
             sample = self.transform(sample)
         else:
-            stacked = np.stack([img_bssfp, img_lge, img_t2w], axis=0)
+            stacked = np.stack([img_bssFP, img_lge, img_t2w], axis=0)
             sample = {
                 "image": torch.from_numpy(stacked).float(),
                 "label": torch.from_numpy(label.astype(np.int64)).long(),
@@ -394,33 +519,36 @@ class MyopsVolumeDataset(Dataset):
 
         self.sample_list = read_split_lines(self.list_dir, split)
 
-        # Support nested Processed_data root if needed
-        root = self.data_root
-        if not (root / "bSSFP").exists() and (root / "Processed_data" / "bSSFP").exists():
-            root = root / "Processed_data"
-
-        self.modality_roots = [
-            root / "bSSFP",
-            root / "LGE",
-            root / "T2w",
-        ]
+        roots, self.is_single_root = resolve_dataset_roots(self.data_root, is_volume=True)
+        self.modality_roots = list(roots)
 
     def __len__(self) -> int:
         return len(self.sample_list)
 
-    def _read_volume(self, root: Path, case_name: str) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any]]:
-        h5_path = root / "test_vol_h5" / f"{case_name}.npy.h5"
-        if not h5_path.is_file():
-            # Check alternative extensions
-            for ext in (".h5", ".npy.h5"):
-                cand = root / "test_vol_h5" / f"{case_name}{ext}"
-                if cand.is_file():
-                    h5_path = cand
-                    break
+    def _read_volume(self, root_or_path: Path, case_name: str | None = None) -> tuple[Any, np.ndarray | None, dict[str, Any]]:
+        if case_name is not None:
+            h5_path = resolve_file_path(root_or_path, case_name, is_volume=True)
+            search_dir = root_or_path
+        else:
+            h5_path = root_or_path
+            search_dir = h5_path.parent
 
         if h5_path.is_file():
             with h5py.File(h5_path, "r") as f:
-                image = f["image"][:]
+                if "bSSFP" in f and "LGE" in f and "T2w" in f:
+                    image = (f["bSSFP"][:].astype(np.float32), f["LGE"][:].astype(np.float32), f["T2w"][:].astype(np.float32))
+                elif "image" in f and "image1" in f and "image2" in f:
+                    image = (f["image"][:].astype(np.float32), f["image1"][:].astype(np.float32), f["image2"][:].astype(np.float32))
+                elif "image" in f:
+                    raw_img = f["image"][:].astype(np.float32)
+                    if raw_img.ndim == 4 and raw_img.shape[0] == 3:
+                        image = (raw_img[0], raw_img[1], raw_img[2])
+                    elif raw_img.ndim == 4 and raw_img.shape[-1] == 3:
+                        image = (raw_img[..., 0], raw_img[..., 1], raw_img[..., 2])
+                    else:
+                        image = raw_img
+                else:
+                    raise KeyError(f"No recognized image dataset in {h5_path}")
                 label = None
                 for k in ("label", "gt", "segmentation"):
                     if k in f:
@@ -430,13 +558,16 @@ class MyopsVolumeDataset(Dataset):
                 for key in ("spacing", "affine", "slice_thickness"):
                     if key in f:
                         metadata[key] = f[key][:]
-            return np.asarray(image, dtype=np.float32), label, metadata
+            return image, label, metadata
 
         # Fallback: Reassemble slices if .npy.h5 is not present
-        slice_dir = root / "train_npz"
-        if not slice_dir.exists():
-            slice_dir = root / "test_npz"
-        paths = list(slice_dir.glob(f"{case_name}_slice*.npz"))
+        slice_dirs = [search_dir / "train_npz", search_dir / "test_npz", search_dir]
+        paths = []
+        for sdir in slice_dirs:
+            if sdir.is_dir():
+                paths = list(sdir.glob(f"{case_name}_slice*.npz"))
+                if paths:
+                    break
         indexed = []
         for path in paths:
             match = re.fullmatch(re.escape(case_name) + r"_slice(\d+)", path.stem)
@@ -444,29 +575,60 @@ class MyopsVolumeDataset(Dataset):
                 indexed.append((int(match[1]), path))
         indexed.sort()
         if not indexed:
-            raise FileNotFoundError(f"Neither test_vol_h5 nor slice files found for {case_name} in {root}")
+            raise FileNotFoundError(f"Neither test_vol_h5 nor slice files found for {case_name} in {search_dir}")
 
         slices = []
         labels = []
         metadata = {}
         for _, p in indexed:
             with np.load(p, allow_pickle=False) as d:
-                slices.append(d["image"])
+                if "bSSFP" in d and "LGE" in d and "T2w" in d:
+                    slices.append((d["bSSFP"], d["LGE"], d["T2w"]))
+                elif "image" in d:
+                    slices.append(d["image"])
                 if "label" in d:
                     labels.append(d["label"])
                 for k in ("spacing", "affine", "slice_thickness"):
                     if k in d and k not in metadata:
                         metadata[k] = d[k]
-        image = np.stack(slices, axis=-1).astype(np.float32)
+        if slices and isinstance(slices[0], tuple):
+            s0 = np.stack([s[0] for s in slices], axis=-1).astype(np.float32)
+            s1 = np.stack([s[1] for s in slices], axis=-1).astype(np.float32)
+            s2 = np.stack([s[2] for s in slices], axis=-1).astype(np.float32)
+            image = (s0, s1, s2)
+        else:
+            image = np.stack(slices, axis=-1).astype(np.float32)
         label = np.stack(labels, axis=-1) if labels else None
         return image, label, metadata
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         case_name = self.sample_list[idx]
 
-        img_bssfp, label, meta = self._read_volume(self.modality_roots[0], case_name)
-        img_lge, _, _ = self._read_volume(self.modality_roots[1], case_name)
-        img_t2w, _, _ = self._read_volume(self.modality_roots[2], case_name)
+        if getattr(self, "is_single_root", False):
+            img_data, label, meta = self._read_volume(self.modality_roots[0], case_name)
+            if isinstance(img_data, (tuple, list)) and len(img_data) == 3:
+                img_bssFP = np.asarray(img_data[0], dtype=np.float32)
+                img_lge = np.asarray(img_data[1], dtype=np.float32)
+                img_t2w = np.asarray(img_data[2], dtype=np.float32)
+            else:
+                img_bssFP = np.asarray(img_data, dtype=np.float32)
+                img_lge = img_bssFP.copy()
+                img_t2w = img_bssFP.copy()
+        else:
+            p0 = resolve_file_path(self.modality_roots[0], case_name, is_volume=True)
+            p1 = resolve_file_path(self.modality_roots[1], case_name, is_volume=True)
+            p2 = resolve_file_path(self.modality_roots[2], case_name, is_volume=True)
+            img_bssFP, label, meta = self._read_volume(p0 if p0.is_file() else self.modality_roots[0], None if p0.is_file() else case_name)
+            img_lge, l1, meta1 = self._read_volume(p1 if p1.is_file() else self.modality_roots[1], None if p1.is_file() else case_name)
+            img_t2w, l2, meta2 = self._read_volume(p2 if p2.is_file() else self.modality_roots[2], None if p2.is_file() else case_name)
+            if isinstance(img_bssFP, (tuple, list)) and len(img_bssFP) == 3:
+                img_bssFP, img_lge, img_t2w = img_bssFP[0], img_bssFP[1], img_bssFP[2]
+            if label is None:
+                label = l1 if l1 is not None else l2
+            for m in (meta1, meta2):
+                for k, v in m.items():
+                    if k not in meta or meta[k] is None:
+                        meta[k] = v
 
         if label is not None:
             label = canonicalize_label(label, order=self.label_order, dataset=self.dataset)
@@ -492,7 +654,7 @@ class MyopsVolumeDataset(Dataset):
             spacing_unit = "voxel"
 
         return {
-            "image": img_bssfp,
+            "image": img_bssFP,
             "image1": img_lge,
             "image2": img_t2w,
             "label": label,

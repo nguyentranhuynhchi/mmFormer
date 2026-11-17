@@ -311,6 +311,47 @@ class TestLossAndArchitecturePreservation(unittest.TestCase):
         self.assertTrue(torch.isfinite(total_loss), "Loss must be finite")
         self.assertGreater(total_loss.item(), 0.0)
 
+    def test_flexible_path_resolution_roi_and_cache(self):
+        """Test flexible path resolution for roi_128_1mm and cache directory layouts in mmFormer."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            data_root = tmp_path / "roi_128_1mm"
+            cache_dir = data_root / "cache"
+            for mod in ("bSSFP", "LGE", "T2w"):
+                (cache_dir / mod / "train_npz").mkdir(parents=True)
+            list_dir = tmp_path / "splits"
+            list_dir.mkdir(parents=True)
+            (list_dir / "train.txt").write_text("Case3002_slice000\n", encoding="utf-8")
+
+            lbl = np.array([[0, 1], [2, 3]], dtype=np.uint8)
+            for mod in ("bSSFP", "LGE", "T2w"):
+                np.savez(cache_dir / mod / "train_npz" / "Case3002_slice000.npz",
+                         image=np.ones((2, 2), dtype=np.float32) * 4.0, label=lbl)
+
+            ds = MyopsDataset(data_root=data_root, list_dir=list_dir, split="train", dataset="myopspp")
+            sample = ds[0]
+            self.assertEqual(sample["image"].shape, (3, 2, 2))
+            np.testing.assert_array_equal(sample["label"].numpy(), lbl)
+
+    def test_flexible_path_resolution_flat_single_root(self):
+        """Test flat single-root layout with 3-channel npz files in mmFormer."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            data_root = tmp_path / "roi_128_1mm"
+            (data_root / "train_npz").mkdir(parents=True)
+            list_dir = tmp_path / "splits"
+            list_dir.mkdir(parents=True)
+            (list_dir / "train.txt").write_text("Case3002_slice000\n", encoding="utf-8")
+
+            lbl = np.array([[0, 1], [2, 3]], dtype=np.uint8)
+            np.savez(data_root / "train_npz" / "Case3002_slice000.npz",
+                     image=np.ones((3, 2, 2), dtype=np.float32) * 6.0, label=lbl)
+
+            ds = MyopsDataset(data_root=data_root, list_dir=list_dir, split="train", dataset="myopspp")
+            sample = ds[0]
+            self.assertEqual(sample["image"].shape, (3, 2, 2))
+            np.testing.assert_array_equal(sample["label"].numpy(), lbl)
+
 
 if __name__ == "__main__":
     unittest.main()
