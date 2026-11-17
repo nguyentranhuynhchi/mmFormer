@@ -1,0 +1,10 @@
+numpy
+scipy
+h5py
+einops
+timm
+tqdm
+tensorboard
+gdown
+SimpleITK
+medpy
