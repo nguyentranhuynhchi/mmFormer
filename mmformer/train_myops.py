@@ -203,7 +203,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0001,
         help="AdamW weight decay (default: 0.0001)",
     )
-    parser.add_argument("--epochs", type=int, default=300, help="Total training epochs (default: 300)")
+    parser.add_argument(
+        "--epochs",
+        "--max-epochs",
+        "--max_epochs",
+        dest="epochs",
+        type=int,
+        default=300,
+        help="Total training epochs (default: 300)",
+    )
     parser.add_argument(
         "--amp",
         type=str,
