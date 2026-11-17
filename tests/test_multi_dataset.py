@@ -52,6 +52,8 @@ import mmformer.train_myops as train_pkg
 import mmformer.evaluate_myops as eval_pkg
 import train_myops as train_root
 import evaluate_myops as eval_root
+import predict as predict_root
+import evaluate_predictions as eval_preds_root
 
 
 class TestMultiDatasetSplits(unittest.TestCase):
@@ -247,6 +249,8 @@ class TestCLIParity(unittest.TestCase):
             ("train_root", train_root.build_parser()),
             ("eval_pkg", eval_pkg.build_parser()),
             ("eval_root", eval_root.build_parser()),
+            ("predict_root", predict_root.build_parser()),
+            ("eval_preds_root", eval_preds_root.build_parser()),
         ]
 
         for name, parser in parsers:
@@ -260,18 +264,16 @@ class TestCLIParity(unittest.TestCase):
             # Check list-dir / split-dir alias
             self.assertIn("list_dir", actions, f"{name} missing list_dir dest")
 
-        # Check train parser specific options
-        for name, parser in [("train_pkg", train_pkg.build_parser()), ("train_root", train_root.build_parser())]:
-            actions = {a.dest: a for a in parser._actions}
+            # Check measure_efficiency flag
             self.assertIn("measure_efficiency", actions, f"{name} missing measure_efficiency")
 
-            # Test parsing dataset choices and aliases
-            parsed_pp = parser.parse_args(["--dataset", "myopspp", "--split-dir", "custom/splits", "--no-measure-efficiency"])
+            extra = ["--checkpoint", "dummy.pt"] if name in ("eval_pkg", "eval_root", "predict_root") else []
+            parsed_pp = parser.parse_args(["--dataset", "myopspp", "--split-dir", "custom/splits", "--no-measure-efficiency"] + extra)
             self.assertEqual(parsed_pp.dataset, "myopspp")
             self.assertEqual(parsed_pp.list_dir, "custom/splits")
             self.assertFalse(parsed_pp.measure_efficiency)
 
-            parsed_380 = parser.parse_args(["--dataset", "myops380", "--list_dir", "other/splits", "--measure_efficiency"])
+            parsed_380 = parser.parse_args(["--dataset", "myops380", "--list_dir", "other/splits", "--measure_efficiency"] + extra)
             self.assertEqual(parsed_380.dataset, "myops380")
             self.assertEqual(parsed_380.list_dir, "other/splits")
             self.assertTrue(parsed_380.measure_efficiency)

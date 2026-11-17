@@ -171,6 +171,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save test_predictions/<CaseID>_pred.npz files (default: True)",
     )
     parser.add_argument("--device", type=str, default="auto", help="Execution device ('auto', 'cuda', 'cpu')")
+    parser.add_argument(
+        "--measure-efficiency",
+        "--measure_efficiency",
+        dest="measure_efficiency",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Measure Complexity and Inference efficiency metrics (default: True)",
+    )
+    parser.add_argument(
+        "--no_measure_efficiency",
+        dest="measure_efficiency",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--efficiency-output",
+        "--efficiency_output",
+        dest="efficiency_output",
+        type=str,
+        default=None,
+        help="Optional destination path for efficiency_metrics.json",
+    )
     return parser
 
 
@@ -266,6 +288,77 @@ def main(argv: Any = None) -> None:
     model.to(device)
     model.eval()
     logger.info("Model loaded successfully. Trainable params: %s", f"{sum(p.numel() for p in model.parameters()):,}")
+
+    if getattr(args, "measure_efficiency", True):
+        from mmformer.utils.efficiency import (
+            build_efficiency_payload,
+            check_rule_compliance,
+            count_parameters,
+            measure_flops,
+            measure_inference_efficiency,
+            save_efficiency_report,
+        )
+        logger.info("--- Efficiency Benchmark Stage 1: FLOPs & Complexity ---")
+        params_info = count_parameters(model)
+        flops_info = measure_flops(model, input_shape=(1, 3, 128, 128), device=device)
+        logger.info(
+            "Trainable Params: %.2fM | Total Params: %.2fM | FLOPs: %.2f G",
+            params_info["trainable_params_m"],
+            params_info["total_params_m"],
+            flops_info["flops_g"],
+        )
+
+        logger.info("--- Efficiency Benchmark Stage 2: Inference Latency & Peak VRAM ---")
+        warmup = getattr(args, "efficiency_warmup", 30 if device.type == "cuda" else 2)
+        repeats = getattr(args, "efficiency_repeats", 100 if device.type == "cuda" else 5)
+        inference_info = measure_inference_efficiency(
+            model,
+            input_shape=(1, 3, 128, 128),
+            device=device,
+            warmup_iters=warmup,
+            benchmark_iters=repeats,
+        )
+        logger.info(
+            "Inference Latency: %.2f ms/slice (FPS: %.2f) | Peak VRAM: %.2f MB",
+            inference_info["latency_ms_per_slice"],
+            inference_info["fps"],
+            inference_info["peak_vram_mb"],
+        )
+
+        rule_compliant, compliance_warnings, hardware_info = check_rule_compliance(
+            device=device,
+            batch_size=getattr(args, "batch_size", 16),
+            max_epochs=getattr(args, "max_epochs", 300),
+            precision="fp32",
+            num_workers=0,
+            pin_memory=False,
+            log=logger,
+        )
+
+        eff_payload = build_efficiency_payload(
+            model_name="mmFormer",
+            model_id="mmformer",
+            seed=getattr(args, "seed", 1234),
+            params_info=params_info,
+            flops_info=flops_info,
+            inference_info=inference_info,
+            training_info=None,
+            rule_compliant=rule_compliant,
+            compliance_warnings=compliance_warnings,
+            hardware_info=hardware_info,
+        )
+        eff_out = (
+            Path(args.efficiency_output)
+            if getattr(args, "efficiency_output", None)
+            else (output_dir / "efficiency_metrics.json")
+        )
+        eff_summary_out = eff_out.parent / "efficiency_summary.txt"
+        save_efficiency_report(
+            eff_payload,
+            [eff_out],
+            [eff_summary_out],
+            log=logger,
+        )
 
     # Load volume dataset
     dataset = MyopsVolumeDataset(
