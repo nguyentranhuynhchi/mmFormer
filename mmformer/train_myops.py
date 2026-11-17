@@ -177,6 +177,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Custom run directory name (default: mmformer_seed<seed> or <dataset>_seed<seed>)",
     )
+    parser.add_argument(
+        "--output-dir",
+        "--output_dir",
+        dest="output_dir",
+        type=str,
+        default=None,
+        help="Direct destination directory for run (overrides run-root / run-name if specified)",
+    )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed (default: 1234)")
     parser.add_argument(
         "--batch-size",
@@ -277,12 +285,15 @@ def main(argv: Any = None) -> None:
     split_dir = Path(args.list_dir) if args.list_dir else resolve_default_split_dir(norm_ds)
 
     # Determine run directory and checkpoint path
-    run_name = args.run_name or f"mmformer_seed{args.seed}"
-    run_root_path = Path(args.run_root)
-    if run_root_path.name != "runs":
-        run_dir = run_root_path / "runs" / run_name
+    if getattr(args, "output_dir", None):
+        run_dir = Path(args.output_dir)
     else:
-        run_dir = run_root_path / run_name
+        run_name = args.run_name or (f"myopspp_seed{args.seed}" if norm_ds == "myopspp" else f"mmformer_seed{args.seed}")
+        run_root_path = Path(args.run_root)
+        if run_root_path.name != "runs":
+            run_dir = run_root_path / "runs" / run_name
+        else:
+            run_dir = run_root_path / run_name
     checkpoint_dir = run_dir / "checkpoints"
     log_dir = run_dir / "logs"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
