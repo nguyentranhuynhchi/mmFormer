@@ -1,13 +1,33 @@
 from .dataset_myops import (
+    CLASS_NAMES,
+    MYOPS380_EXPECTED_TEST_VOLUMES,
+    MYOPS380_EXPECTED_TRAIN_PATIENTS,
+    MYOPS380_EXPECTED_TRAIN_SLICES,
+    MYOPSPP_EXPECTED_TEST_VOLUMES,
+    MYOPSPP_EXPECTED_TRAIN_PATIENTS,
+    MYOPSPP_EXPECTED_TRAIN_SLICES,
     MyopsDataset,
     MyopsVolumeDataset,
     RandomGenerator,
     canonicalize_label,
+    normalize_dataset_name,
+    patient_id,
+    resolve_default_split_dir,
 )
 
 __all__ = [
+    "CLASS_NAMES",
+    "MYOPS380_EXPECTED_TEST_VOLUMES",
+    "MYOPS380_EXPECTED_TRAIN_PATIENTS",
+    "MYOPS380_EXPECTED_TRAIN_SLICES",
+    "MYOPSPP_EXPECTED_TEST_VOLUMES",
+    "MYOPSPP_EXPECTED_TRAIN_PATIENTS",
+    "MYOPSPP_EXPECTED_TRAIN_SLICES",
     "MyopsDataset",
     "MyopsVolumeDataset",
     "RandomGenerator",
     "canonicalize_label",
+    "normalize_dataset_name",
+    "patient_id",
+    "resolve_default_split_dir",
 ]

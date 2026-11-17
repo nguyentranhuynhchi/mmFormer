@@ -11,10 +11,13 @@ from .optimization import (
     validate_optimization_checkpoint,
 )
 from .metrics import (
+    BENCHMARK_PROTOCOLS,
     BENCHMARK_PROTOCOL,
     binary_metrics,
     dataset_rows,
     summarize_dataset_rows,
+    compute_patient_surface_distances,
+    metric_hd95_slice_robust,
 )
 from .efficiency import (
     build_efficiency_payload,
@@ -36,10 +39,13 @@ __all__ = [
     "build_optimizer",
     "build_scheduler",
     "validate_optimization_checkpoint",
+    "BENCHMARK_PROTOCOLS",
     "BENCHMARK_PROTOCOL",
     "binary_metrics",
     "dataset_rows",
     "summarize_dataset_rows",
+    "compute_patient_surface_distances",
+    "metric_hd95_slice_robust",
     "build_efficiency_payload",
     "check_rule_compliance",
     "count_parameters",

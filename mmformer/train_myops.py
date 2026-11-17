@@ -1,7 +1,8 @@
-"""Training script for mmFormer on MyoPS380 (no-val protocol).
+"""Training script for mmFormer on MyoPS380 and MyoPS++ (no-val protocol).
 
-Protocol: myops380_train304_test76_last_v1
-Budget: 300 epochs, physical batch 16, 37,200 total updates.
+Protocols:
+  - MyoPS380: myops380_train304_test76_last_v1 (300 epochs, batch 16, 37,200 total updates)
+  - MyoPS++:  myopspp_bc80_train64_test16_last_v1 (300 epochs, batch 16, 5,700 total updates)
 Objective: Loss_total = Loss_fuse + Loss_sep + Loss_prm (CE + SoftDice on 4 canonical classes)
 Optimizer: AdamW (lr=0.0003333, wd=0.0001, betas=(0.9, 0.999))
 Scheduler: Polynomial decay (power=0.9, zero-based offset)
@@ -35,7 +36,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from mmformer.mmformer import Model
-from mmformer.data.dataset_myops import MyopsDataset, RandomGenerator
+from mmformer.data.dataset_myops import (
+    MyopsDataset,
+    RandomGenerator,
+    normalize_dataset_name,
+    resolve_default_split_dir,
+)
 from mmformer.utils.criterions import compute_mmformer_loss
 from mmformer.utils.efficiency import (
     build_efficiency_payload,
@@ -102,34 +108,58 @@ def _sync_cuda(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def _read_cuda_peak_bytes(device: torch.device) -> int:
+    if device.type == "cuda" and torch.cuda.is_available():
+        return int(torch.cuda.max_memory_allocated(device))
+    return 0
+
+
+def _read_cuda_reserved_bytes(device: torch.device) -> int:
+    if device.type == "cuda" and torch.cuda.is_available():
+        return int(torch.cuda.max_memory_reserved(device))
+    return 0
+
+
 def _dedupe_paths(paths: list[Path]) -> list[Path]:
-    unique: list[Path] = []
     seen: set[Path] = set()
-    for path in paths:
-        resolved = path.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            unique.append(path)
+    unique: list[Path] = []
+    for p in paths:
+        res = p.resolve()
+        if res not in seen:
+            seen.add(res)
+            unique.append(p)
     return unique
 
 
-def parse_args(args: Any = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train mmFormer on MyoPS380 without validation")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Train mmFormer on MyoPS380 and MyoPS++ without validation")
+    parser.add_argument(
+        "--dataset",
+        "--dataset_id",
+        "--dataset-id",
+        dest="dataset",
+        type=str,
+        default="myops380",
+        choices=["myops380", "myopspp", "myopspp_unet2d_roi128_1mm", "myops_380"],
+        help="Target dataset benchmark ('myops380' or 'myopspp')",
+    )
     parser.add_argument(
         "--data-root",
         "--data_root",
         dest="data_root",
         type=str,
         default=os.environ.get("LOCAL_DATASET", "E:/STUDY/DATASET/MyoPS380/Processed_data"),
-        help="Path to preprocessed MyoPS380 dataset root containing bSSFP, LGE, T2w",
+        help="Path to preprocessed dataset root containing bSSFP, LGE, T2w",
     )
     parser.add_argument(
         "--list-dir",
         "--list_dir",
+        "--split-dir",
+        "--split_dir",
         dest="list_dir",
         type=str,
-        default=str(repo_root / "splits" / "myops380_no_val"),
-        help="Path to split manifests folder containing train.txt and test_vol.txt",
+        default=None,
+        help="Path to split manifests folder containing train.txt and test_vol.txt (defaults dynamically by dataset)",
     )
     parser.add_argument(
         "--run-root",
@@ -145,7 +175,7 @@ def parse_args(args: Any = None) -> argparse.Namespace:
         dest="run_name",
         type=str,
         default=None,
-        help="Custom run directory name (default: mmformer_seed<seed>)",
+        help="Custom run directory name (default: mmformer_seed<seed> or <dataset>_seed<seed>)",
     )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed (default: 1234)")
     parser.add_argument(
@@ -190,6 +220,7 @@ def parse_args(args: Any = None) -> argparse.Namespace:
         default=None,
         help="Pin host memory for CUDA transfers (default: True on CUDA)",
     )
+    parser.add_argument("--no_pin_memory", dest="pin_memory", action="store_false", help=argparse.SUPPRESS)
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .pt to resume training from")
     parser.add_argument(
         "--measure-efficiency",
@@ -199,13 +230,14 @@ def parse_args(args: Any = None) -> argparse.Namespace:
         default=True,
         help="Measure Complexity, Inference, and Training efficiency metrics and export JSON (default: True)",
     )
+    parser.add_argument("--no_measure_efficiency", dest="measure_efficiency", action="store_false", help=argparse.SUPPRESS)
     parser.add_argument(
         "--efficiency-output",
         "--efficiency_output",
         dest="efficiency_output",
         type=str,
-        default="outputs/runs/mmformer/efficiency_metrics.json",
-        help="Primary JSON output path for efficiency metrics",
+        default=None,
+        help="Primary JSON output path for efficiency metrics (defaults to run_dir/efficiency_metrics.json)",
     )
     parser.add_argument(
         "--efficiency-warmup",
@@ -230,11 +262,19 @@ def parse_args(args: Any = None) -> argparse.Namespace:
         action="store_true",
         help="Measure Complexity + Inference efficiency only (skip training loop)",
     )
-    return parser.parse_args(args)
+    return parser
+
+
+def parse_args(args: Any = None) -> argparse.Namespace:
+    return build_parser().parse_args(args)
 
 
 def main(argv: Any = None) -> None:
     args = parse_args(argv)
+    norm_ds = normalize_dataset_name(args.dataset)
+
+    # Determine split directory
+    split_dir = Path(args.list_dir) if args.list_dir else resolve_default_split_dir(norm_ds)
 
     # Determine run directory and checkpoint path
     run_name = args.run_name or f"mmformer_seed{args.seed}"
@@ -260,9 +300,11 @@ def main(argv: Any = None) -> None:
         ],
     )
 
+    proto_id = "myopspp_bc80_train64_test16_last_v1" if norm_ds == "myopspp" else "myops380_train304_test76_last_v1"
     logger.info("================================================================================")
-    logger.info("mmFormer MyoPS380 Training - Protocol: myops380_train304_test76_last_v1")
+    logger.info("mmFormer Training - Dataset: %s | Protocol: %s", norm_ds, proto_id)
     logger.info("Run directory: %s", run_dir)
+    logger.info("Splits directory: %s", split_dir)
     logger.info("================================================================================")
 
     # Seed
@@ -303,18 +345,10 @@ def main(argv: Any = None) -> None:
     total_params = params_info["total_params"]
     trainable_params = params_info["trainable_params"]
 
-    logger.info(
-        "INFO | Device %s | AMP %s | parameters %s (trainable: %s) | train/val slices 1972/0 | effective batch <= %d",
-        device.type,
-        str(amp_dtype) if amp_dtype else "fp32",
-        f"{total_params:,}",
-        f"{trainable_params:,}",
-        args.batch_size,
-    )
-
     # Save run configuration
     config_dict = {
         "model_id": "mmformer",
+        "dataset": norm_ds,
         "architecture": "mmFormer-2D",
         "parameters_total": total_params,
         "parameters_trainable": trainable_params,
@@ -324,7 +358,7 @@ def main(argv: Any = None) -> None:
         "img_size": 128,
         "patch_size": 8,
         "training_protocol": {
-            "id": "myops380_train304_test76_last_v1",
+            "id": proto_id,
             "epochs": args.epochs,
             "physical_batch": args.batch_size,
             "accum_steps": 1,
@@ -357,45 +391,43 @@ def main(argv: Any = None) -> None:
     # Ensure FP32 base weights and move model to device
     model.float().to(device)
 
-    eff_out_parent = Path(args.efficiency_output).parent
-    efficiency_json_targets = _dedupe_paths(
-        [Path(args.efficiency_output), run_dir / "efficiency_metrics.json"]
-    )
-    efficiency_summary_targets = _dedupe_paths(
-        [
-            log_dir / "efficiency_summary.txt",
-            eff_out_parent / "logs" / "efficiency_summary.txt",
-            eff_out_parent / "efficiency_summary.txt",
-        ]
-    )
+    eff_out_path = Path(args.efficiency_output) if args.efficiency_output else (run_dir / "efficiency_metrics.json")
+    eff_out_parent = eff_out_path.parent
+    eff_out_parent.mkdir(parents=True, exist_ok=True)
+
+    efficiency_json_targets = _dedupe_paths([
+        eff_out_path,
+        run_dir / "efficiency_metrics.json",
+        repo_root / "outputs" / "runs" / "mmformer" / "efficiency_metrics.json",
+    ])
+    efficiency_summary_targets = _dedupe_paths([
+        eff_out_parent / "efficiency_summary.txt",
+        run_dir / "efficiency_summary.txt",
+        log_dir / "efficiency_summary.txt",
+    ])
 
     flops_info: dict[str, Any] | None = None
     inference_info: dict[str, Any] | None = None
+
     if args.measure_efficiency or args.efficiency_only:
-        logger.info(
-            "Measuring Complexity (FP32 FLOPs on 1x3x128x128) & Inference (Batch=1, %d warmup / %d runs)...",
-            args.efficiency_warmup,
-            args.efficiency_repeats,
-        )
+        logger.info("--- Efficiency Benchmark Stage 1: FLOPs & Complexity ---")
         flops_info = measure_flops(model, input_shape=(1, 3, 128, 128), device=device)
+        macs_str = f"{flops_info['macs_count']:,}" if "macs_count" in flops_info else "N/A"
+        logger.info("FLOPs (G): %.4f | Mac count: %s", flops_info["flops_g"], macs_str)
+
+        logger.info("--- Efficiency Benchmark Stage 2: Inference Latency & Peak VRAM ---")
         inference_info = measure_inference_efficiency(
             model,
             input_shape=(1, 3, 128, 128),
             device=device,
-            warmup=args.efficiency_warmup,
-            repeats=args.efficiency_repeats,
+            warmup_iters=args.efficiency_warmup,
+            benchmark_iters=args.efficiency_repeats,
         )
         logger.info(
-            "Complexity | Trainable Params: %.2fM (Total: %.2fM) | FLOPs: %.2f G",
-            params_info["trainable_params_m"],
-            params_info["total_params_m"],
-            flops_info["flops_g"],
-        )
-        logger.info(
-            "Inference (B=1, FP32) | Latency: %.2f ms/slice | Peak VRAM: %.2f MB (%.4f GB)",
+            "Inference Latency: %.2f ms/slice (FPS: %.2f) | Peak VRAM: %.2f MB",
             inference_info["latency_ms_per_slice"],
+            inference_info["fps"],
             inference_info["peak_vram_mb"],
-            inference_info["peak_vram_gb"],
         )
 
         if args.efficiency_only:
@@ -412,18 +444,19 @@ def main(argv: Any = None) -> None:
                 hardware_info=hardware_info,
             )
             save_efficiency_report(payload, efficiency_json_targets, efficiency_summary_targets, log=logger)
+            logger.info("Efficiency-only benchmark complete. Exiting without training.")
             return
 
-    # Dataset & Dataloader
+    # Dataset & DataLoader (100% exact I-MMSeg augmentation)
     transform = RandomGenerator(output_size=(128, 128))
     train_dataset = MyopsDataset(
         data_root=args.data_root,
-        list_dir=args.list_dir,
+        list_dir=split_dir,
         split="train",
         transform=transform,
-        label_order="legacy",
+        dataset=norm_ds,
     )
-    logger.info("Loaded train dataset: %d slices", len(train_dataset))
+    logger.info("Loaded train dataset: %d slices (%s)", len(train_dataset), norm_ds)
 
     g = torch.Generator()
     g.manual_seed(args.seed)
@@ -440,7 +473,7 @@ def main(argv: Any = None) -> None:
     )
 
     batches_per_epoch = len(train_loader)
-    total_planned_updates = args.epochs * batches_per_epoch  # 300 * 124 = 37,200
+    total_planned_updates = args.epochs * batches_per_epoch  # MyoPS380: 300 * 124 = 37,200; MyoPS++: 300 * 19 = 5,700
     logger.info("Batches per epoch: %d | Total planned updates: %d", batches_per_epoch, total_planned_updates)
 
     # Clear CUDA cache & reset peak memory stats right before allocating training state
@@ -481,42 +514,38 @@ def main(argv: Any = None) -> None:
         max_train_peak_vram_bytes = int(resume_ckpt.get("train_peak_vram_bytes", 0))
         max_train_reserved_bytes = int(resume_ckpt.get("train_peak_reserved_bytes", 0))
 
-        # Restore RNG states
         if "rng_state" in resume_ckpt:
             rng = resume_ckpt["rng_state"]
-            torch.set_rng_state(rng["torch"].cpu())
-            if torch.cuda.is_available() and "cuda" in rng and rng["cuda"] is not None:
-                torch.cuda.set_rng_state_all([s.cpu() for s in rng["cuda"]])
+            torch.set_rng_state(rng["torch"])
             np.random.set_state(rng["numpy"])
             random.setstate(rng["random"])
-
-        logger.info("Resumed from epoch %d (step %d, updates %d)", resume_ckpt["epoch"], global_step, total_updates)
-        del resume_ckpt
+            if torch.cuda.is_available() and "cuda" in rng:
+                torch.cuda.set_rng_state_all(rng["cuda"])
 
     # Training loop
     logger.info("Starting training loop from epoch %d to %d...", start_epoch, args.epochs)
+    model.train()
     session_start_time = time.perf_counter()
 
     for epoch in range(start_epoch, args.epochs + 1):
-        _sync_cuda(device)
-        epoch_start_time = time.perf_counter()
-        model.train()
+        epoch_start = time.perf_counter()
         running_loss = 0.0
         running_fuse = 0.0
         running_sep = 0.0
         running_prm = 0.0
 
-        for batch_idx, sampled_batch in enumerate(train_loader):
-            images = sampled_batch["image"].to(device, non_blocking=pin_memory)
-            labels = sampled_batch["label"].to(device, non_blocking=pin_memory)
+        for batch_idx, batch in enumerate(train_loader):
+            images = batch["image"].to(device, non_blocking=pin_memory)
+            labels = batch["label"].to(device, non_blocking=pin_memory)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
-            if device.type == "cuda" and amp_dtype is not None:
-                with torch.amp.autocast(device_type="cuda", dtype=amp_dtype):
+            if amp_dtype is not None:
+                with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
                     fuse_pred, sep_preds, prm_preds = model(images)
-                    loss, loss_metrics = compute_mmformer_loss(fuse_pred, sep_preds, prm_preds, labels, num_cls=4)
-
+                    loss, loss_metrics = compute_mmformer_loss(
+                        fuse_pred, sep_preds, prm_preds, labels
+                    )
                 if use_scaler:
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
@@ -526,27 +555,48 @@ def main(argv: Any = None) -> None:
                     optimizer.step()
             else:
                 fuse_pred, sep_preds, prm_preds = model(images)
-                loss, loss_metrics = compute_mmformer_loss(fuse_pred, sep_preds, prm_preds, labels, num_cls=4)
+                loss, loss_metrics = compute_mmformer_loss(
+                    fuse_pred, sep_preds, prm_preds, labels
+                )
                 loss.backward()
                 optimizer.step()
 
-            # Polynomial LR step after every successful optimizer update
             scheduler.step()
-            total_updates += 1
-            global_step += 1
 
-            running_loss += loss_metrics["loss_total"]
-            running_fuse += loss_metrics["loss_fuse"]
-            running_sep += loss_metrics["loss_sep"]
-            running_prm += loss_metrics["loss_prm"]
+            global_step += 1
+            total_updates += 1
+
+            running_loss += loss.item()
+            running_fuse += loss_metrics.get("loss_fuse", 0.0)
+            running_sep += loss_metrics.get("loss_sep", 0.0)
+            running_prm += loss_metrics.get("loss_prm", 0.0)
+
+            if (batch_idx + 1) % 20 == 0 or (batch_idx + 1) == batches_per_epoch:
+                current_lr = scheduler.get_last_lr()[0]
+                logger.info(
+                    "Epoch [%3d/%3d] Batch [%3d/%3d] | Loss: %.4f (Fuse: %.4f, Sep: %.4f, PRM: %.4f) | LR: %.7f",
+                    epoch,
+                    args.epochs,
+                    batch_idx + 1,
+                    batches_per_epoch,
+                    loss.item(),
+                    loss_metrics.get("loss_fuse", 0.0),
+                    loss_metrics.get("loss_sep", 0.0),
+                    loss_metrics.get("loss_prm", 0.0),
+                    current_lr,
+                )
 
         _sync_cuda(device)
-        epoch_duration = time.perf_counter() - epoch_start_time
+        epoch_end = time.perf_counter()
+        epoch_duration = epoch_end - epoch_start
         epoch_times.append(epoch_duration)
 
-        if device.type == "cuda" and torch.cuda.is_available():
-            max_train_peak_vram_bytes = max(max_train_peak_vram_bytes, int(torch.cuda.max_memory_allocated(device)))
-            max_train_reserved_bytes = max(max_train_reserved_bytes, int(torch.cuda.max_memory_reserved(device)))
+        peak_bytes = _read_cuda_peak_bytes(device)
+        res_bytes = _read_cuda_reserved_bytes(device)
+        if peak_bytes > max_train_peak_vram_bytes:
+            max_train_peak_vram_bytes = peak_bytes
+        if res_bytes > max_train_reserved_bytes:
+            max_train_reserved_bytes = res_bytes
 
         avg_loss = running_loss / batches_per_epoch
         avg_fuse = running_fuse / batches_per_epoch
@@ -588,6 +638,7 @@ def main(argv: Any = None) -> None:
             "total_updates": total_updates,
             "total_planned_updates": total_planned_updates,
             "model_id": "mmformer",
+            "dataset": norm_ds,
             "parameters_count": total_params,
             "epoch_times": epoch_times,
             "total_wall_clock_seconds": total_wall_clock_s,
@@ -599,11 +650,8 @@ def main(argv: Any = None) -> None:
             "scaler_state_dict": scaler.state_dict() if use_scaler else None,
             "rng_state": rng_state,
             "training_protocol": {
-                "id": "myops380_train304_test76_last_v1",
-                "cohort": "myops380",
-                "train_patients": 304,
-                "train_slices": 1972,
-                "test_patients": 76,
+                "id": proto_id,
+                "cohort": norm_ds,
                 "epochs": args.epochs,
             },
             "optimization_protocol": OPTIMIZATION_PROTOCOL,

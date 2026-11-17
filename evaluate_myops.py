@@ -1,4 +1,4 @@
-"""Root launcher for mmFormer MyoPS380 evaluation."""
+"""Root launcher for mmFormer MyoPS380 and MyoPS++ evaluation."""
 import sys
 from pathlib import Path
 
@@ -10,7 +10,7 @@ while pkg_dir in sys.path:
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
-from mmformer.evaluate_myops import main
+from mmformer.evaluate_myops import build_parser, main, parse_args
 
 if __name__ == "__main__":
     main()

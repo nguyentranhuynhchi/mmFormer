@@ -83,6 +83,7 @@ def measure_flops(
         "flops_total": total_flops,
         "flops_g": round(total_flops / 1e9, 4),
         "flops_g_excel": round(total_flops / 1e9, 2),
+        "macs_count": total_flops // 2,
     }
 
 
@@ -92,8 +93,14 @@ def measure_inference_efficiency(
     device: torch.device | None = None,
     warmup: int = 30,
     repeats: int = 100,
+    warmup_iters: int | None = None,
+    benchmark_iters: int | None = None,
 ) -> dict[str, Any]:
     """Measure Batch=1 FP32 inference latency and peak allocated VRAM."""
+    if warmup_iters is not None:
+        warmup = warmup_iters
+    if benchmark_iters is not None:
+        repeats = benchmark_iters
     if device is None:
         device = next(model.parameters()).device
 
@@ -131,6 +138,7 @@ def measure_inference_efficiency(
     peak_mb, peak_gb = _bytes_to_mb_gb(peak_alloc_bytes)
     reserved_mb, reserved_gb = _bytes_to_mb_gb(peak_reserved_bytes)
 
+    fps = round(1000.0 / max(1e-6, latency_ms), 2)
     return {
         "batch_size": int(input_shape[0]),
         "input_shape": list(input_shape),
@@ -139,6 +147,7 @@ def measure_inference_efficiency(
         "measure_runs": int(repeats),
         "latency_ms_per_slice": round(latency_ms, 4),
         "latency_ms": round(latency_ms, 4),
+        "fps": fps,
         "peak_vram_bytes": peak_alloc_bytes,
         "peak_vram_mb": round(peak_mb, 2),
         "peak_vram_gb": round(peak_gb, 4),

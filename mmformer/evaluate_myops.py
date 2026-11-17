@@ -1,6 +1,8 @@
-"""Evaluation script for mmFormer on MyoPS380 test set.
+"""Evaluation script for mmFormer on MyoPS380 and MyoPS++ test sets.
 
-Protocol: myops380_voxel_v3 (Shared Evaluator)
+Protocols:
+  - MyoPS380: myops380_voxel_v3 (Shared Evaluator, 76 Cases, Voxel units)
+  - MyoPS++:  myopspp_unet2d_roi128_1mm_predicted_roi_mm_v1 (16 Cases, Physical mm units)
 Outputs:
   1) <run_dir>/test_predictions/<CaseID>_pred.npz (Canonical label format, label 3 is Scar)
   2) <output_dir>/per_case.csv (Full per-case, per-region breakdown)
@@ -32,8 +34,18 @@ from scipy.ndimage import zoom
 import torch
 
 from mmformer.mmformer import Model
-from mmformer.data.dataset_myops import MyopsVolumeDataset, canonicalize_label
-from mmformer.utils.metrics import BENCHMARK_PROTOCOL, dataset_rows, summarize_dataset_rows
+from mmformer.data.dataset_myops import (
+    MyopsVolumeDataset,
+    canonicalize_label,
+    normalize_dataset_name,
+    resolve_default_split_dir,
+)
+from mmformer.utils.metrics import (
+    BENCHMARK_PROTOCOLS,
+    BENCHMARK_PROTOCOL,
+    dataset_rows,
+    summarize_dataset_rows,
+)
 
 logger = logging.getLogger("mmFormer_Eval")
 
@@ -59,8 +71,12 @@ def json_safe(val: Any) -> Any:
     return val
 
 
-def format_master_clinical_table(summary: dict[str, Any]) -> str:
+def format_master_clinical_table(summary: dict[str, Any], dataset: str = "myops380") -> str:
     """Format Master Benchmark clinical table matching specification."""
+    norm_ds = normalize_dataset_name(dataset)
+    proto = BENCHMARK_PROTOCOLS.get(norm_ds, BENCHMARK_PROTOCOLS["myops380"])
+    dist_unit = proto["distance_unit"]
+
     regions = [
         "normal_myocardium",
         "edema",
@@ -68,19 +84,22 @@ def format_master_clinical_table(summary: dict[str, Any]) -> str:
         "edema_inclusive",
         "myocardial_ring",
     ]
+    hd_label = f"HD95 ({dist_unit})" if dist_unit == "mm" else "HD95 (vox)"
+    asd_label = f"ASD ({dist_unit})" if dist_unit == "mm" else "ASD (vox)"
+
     lines = [
         "================================================================================",
-        "MASTER BENCHMARK CLINICAL EVALUATION RESULTS (Protocol: myops380_voxel_v3)",
+        f"MASTER BENCHMARK CLINICAL EVALUATION RESULTS (Protocol: {proto['id']})",
         "--------------------------------------------------------------------------------",
-        f"{'Region':<22} | {'Dice Mean':<10} | {'IoU Mean':<10} | {'HD95 (vox)':<12} | {'ASD (vox)':<10}",
+        f"{'Region':<22} | {'Dice Mean':<10} | {'IoU Mean':<10} | {hd_label:<12} | {asd_label:<10}",
         "--------------------------------------------------------------------------------",
     ]
     for r_name in regions:
         reg = summary.get(r_name, {})
         d = reg.get("mean_dice")
         i = reg.get("mean_iou")
-        h = reg.get("mean_hd95_voxel")
-        a = reg.get("mean_asd_voxel")
+        h = reg.get(f"mean_hd95_{dist_unit}") if reg.get(f"mean_hd95_{dist_unit}") is not None else reg.get("mean_hd95_voxel")
+        a = reg.get(f"mean_asd_{dist_unit}") if reg.get(f"mean_asd_{dist_unit}") is not None else reg.get("mean_asd_voxel")
         d_str = f"{d:.4f}" if d is not None else "N/A"
         i_str = f"{i:.4f}" if i is not None else "N/A"
         h_str = f"{h:.2f}" if h is not None else "N/A"
@@ -97,8 +116,8 @@ def format_master_clinical_table(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def parse_args(args: Any = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate mmFormer on MyoPS380 official 76 test cases")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Evaluate mmFormer on MyoPS380 and MyoPS++ test cases")
     parser.add_argument(
         "--checkpoint",
         "--ckpt",
@@ -108,20 +127,32 @@ def parse_args(args: Any = None) -> argparse.Namespace:
         help="Path to trained checkpoint (e.g. outputs/runs/mmformer_seed1234/checkpoints/mmformer_seed1234.pt)",
     )
     parser.add_argument(
+        "--dataset",
+        "--dataset_id",
+        "--dataset-id",
+        dest="dataset",
+        type=str,
+        default="myops380",
+        choices=["myops380", "myopspp", "myopspp_unet2d_roi128_1mm", "myops_380"],
+        help="Target dataset benchmark ('myops380' or 'myopspp')",
+    )
+    parser.add_argument(
         "--data-root",
         "--data_root",
         dest="data_root",
         type=str,
         default=os.environ.get("LOCAL_DATASET", "E:/STUDY/DATASET/MyoPS380/Processed_data"),
-        help="Path to preprocessed MyoPS380 dataset root containing bSSFP, LGE, T2w",
+        help="Path to preprocessed dataset root containing bSSFP, LGE, T2w",
     )
     parser.add_argument(
         "--list-dir",
         "--list_dir",
+        "--split-dir",
+        "--split_dir",
         dest="list_dir",
         type=str,
-        default=str(repo_root / "splits" / "myops380_no_val"),
-        help="Path to split manifests folder containing test_vol.txt",
+        default=None,
+        help="Path to split manifests folder containing test_vol.txt (defaults dynamically by dataset)",
     )
     parser.add_argument(
         "--output-dir",
@@ -140,7 +171,11 @@ def parse_args(args: Any = None) -> argparse.Namespace:
         help="Save test_predictions/<CaseID>_pred.npz files (default: True)",
     )
     parser.add_argument("--device", type=str, default="auto", help="Execution device ('auto', 'cuda', 'cpu')")
-    return parser.parse_args(args)
+    return parser
+
+
+def parse_args(args: Any = None) -> argparse.Namespace:
+    return build_parser().parse_args(args)
 
 
 def predict_case_volume(
@@ -183,6 +218,9 @@ def predict_case_volume(
 
 def main(argv: Any = None) -> None:
     args = parse_args(argv)
+    norm_ds = normalize_dataset_name(args.dataset)
+    split_dir = Path(args.list_dir) if args.list_dir else resolve_default_split_dir(norm_ds)
+
     ckpt_path = Path(args.checkpoint)
     if not ckpt_path.is_file():
         raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path}")
@@ -205,10 +243,12 @@ def main(argv: Any = None) -> None:
         ],
     )
 
+    proto = BENCHMARK_PROTOCOLS.get(norm_ds, BENCHMARK_PROTOCOLS["myops380"])
     logger.info("================================================================================")
-    logger.info("mmFormer MyoPS380 Evaluation - Protocol: myops380_voxel_v3")
+    logger.info("mmFormer Evaluation - Dataset: %s | Protocol: %s", norm_ds, proto["id"])
     logger.info("Checkpoint: %s", ckpt_path)
     logger.info("Output directory: %s", output_dir)
+    logger.info("Splits directory: %s", split_dir)
     logger.info("Prediction directory: %s", pred_dir)
     logger.info("================================================================================")
 
@@ -230,9 +270,9 @@ def main(argv: Any = None) -> None:
     # Load volume dataset
     dataset = MyopsVolumeDataset(
         data_root=args.data_root,
-        list_dir=args.list_dir,
+        list_dir=split_dir,
         split="test_vol",
-        label_order="legacy",
+        dataset=norm_ds,
     )
     logger.info("Total test volume cases: %d", len(dataset))
 
@@ -248,6 +288,7 @@ def main(argv: Any = None) -> None:
         img_lge = case_sample["image1"]
         img_t2w = case_sample["image2"]
         target = case_sample["label"]
+        spacing = case_sample.get("spacing", None)
 
         # Run 3D volume inference
         pred_3d = predict_case_volume(model, img_bssfp, img_lge, img_t2w, device)
@@ -260,7 +301,14 @@ def main(argv: Any = None) -> None:
         # Compute metrics if ground truth is available
         if target is not None:
             has_labels = True
-            rows = dataset_rows(pred_3d, target, case_name, compute_distance=True)
+            rows = dataset_rows(
+                prediction=pred_3d,
+                target=target,
+                case=case_name,
+                compute_distance=True,
+                dataset=norm_ds,
+                spacing=spacing,
+            )
             all_metric_rows.extend(rows)
 
             scar_row = next((r for r in rows if r["region"] == "scar"), None)
@@ -275,6 +323,7 @@ def main(argv: Any = None) -> None:
     logger.info("Inference complete in %.1f seconds.", total_time)
 
     if has_labels and all_metric_rows:
+        dist_unit = proto["distance_unit"]
         # Write per_case.csv
         csv_file = output_dir / "per_case.csv"
         fieldnames = [
@@ -284,6 +333,8 @@ def main(argv: Any = None) -> None:
             "iou",
             "precision",
             "recall",
+            f"hd95_{dist_unit}",
+            f"asd_{dist_unit}",
             "hd95_voxel",
             "asd_voxel",
             "status",
@@ -299,13 +350,22 @@ def main(argv: Any = None) -> None:
         logger.info("Per-case metrics saved to: %s", csv_file)
 
         # Summarize rows and write metrics.json
-        summary = summarize_dataset_rows(all_metric_rows)
+        summary = summarize_dataset_rows(all_metric_rows, dataset=norm_ds)
         metrics_payload = {
-            "protocol": BENCHMARK_PROTOCOL,
+            "protocol": proto,
+            "dataset": norm_ds,
+            "distance_unit": dist_unit,
             "summary": summary,
+            # Mirror top-level keys for backwards-compatibility with summary tools
+            "scar": summary.get("scar", {}),
+            "edema": summary.get("edema", {}),
+            "edema_inclusive": summary.get("edema_inclusive", {}),
+            "normal_myocardium": summary.get("normal_myocardium", {}),
+            "myocardial_ring": summary.get("myocardial_ring", {}),
             "provenance": {
                 "checkpoint": str(ckpt_path),
                 "model_id": "mmformer",
+                "dataset": norm_ds,
                 "evaluated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "total_cases": len(dataset),
             },
@@ -316,7 +376,7 @@ def main(argv: Any = None) -> None:
         logger.info("Summary metrics saved to: %s", json_file)
 
         # Print Master Benchmark clinical table to terminal and logger
-        clinical_table_str = format_master_clinical_table(summary)
+        clinical_table_str = format_master_clinical_table(summary, dataset=norm_ds)
         for line in clinical_table_str.splitlines():
             logger.info("%s", line)
 
