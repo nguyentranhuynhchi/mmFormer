@@ -10,7 +10,13 @@ while pkg_dir in sys.path:
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
-from mmformer.evaluate_myops import build_parser, main, parse_args
+from mmformer.evaluate_myops import (
+    build_parser,
+    format_master_clinical_table,
+    main,
+    parse_args,
+    predict_case_volume,
+)
 
 if __name__ == "__main__":
     main()
